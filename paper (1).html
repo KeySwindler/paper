@@ -1,0 +1,353 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Paper</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { width:100vw; height:100vh; overflow:hidden; background:#b0a898; }
+
+  #canvas { display:block; width:100%; height:100%; }
+
+  #toolbar {
+    position: fixed;
+    bottom: 28px;
+    left: 50%;
+    transform: translateX(-50%);
+    display: flex;
+    align-items: center;
+    gap: 18px;
+    z-index: 100;
+  }
+
+  .tool-btn {
+    width: 48px;
+    height: 48px;
+    border: none;
+    background: none;
+    cursor: pointer;
+    padding: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    opacity: 0.7;
+    transition: opacity 0.15s, transform 0.15s;
+  }
+  .tool-btn img {
+    width: 100%;
+    height: 100%;
+    object-fit: contain;
+    display: block;
+  }
+  .tool-btn:hover  { opacity: 1; transform: scale(1.1); }
+  .tool-btn.active { opacity: 1; }
+
+  #colour-strip {
+    position: fixed;
+    bottom: 28px;
+    right: 32px;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    align-items: center;
+    z-index: 100;
+  }
+
+  .colour-swatch {
+    width: 18px;
+    height: 18px;
+    border-radius: 50%;
+    cursor: pointer;
+    border: 2px solid transparent;
+    transition: transform 0.1s, border-color 0.1s;
+    opacity: 0.8;
+  }
+  .colour-swatch:hover    { transform: scale(1.25); opacity: 1; }
+  .colour-swatch.selected { border-color: rgba(255,255,255,0.9); opacity: 1; transform: scale(1.15); }
+
+  #pen-sizes {
+    position: fixed;
+    bottom: 92px;
+    left: 50%;
+    transform: translateX(-50%);
+    display: none;
+    gap: 14px;
+    align-items: center;
+    z-index: 100;
+  }
+  #pen-sizes.visible { display: flex; }
+
+  .size-dot {
+    border-radius: 50%;
+    cursor: pointer;
+    transition: transform 0.1s, box-shadow 0.1s;
+    flex-shrink: 0;
+    opacity: 0.75;
+  }
+  .size-dot:hover    { transform: scale(1.25); opacity: 1; }
+  .size-dot.selected { opacity: 1; box-shadow: 0 0 0 2px rgba(255,255,255,0.9); }
+
+  body.mode-draw  #canvas { cursor: crosshair; }
+  body.mode-text  #canvas { cursor: text; }
+  body.mode-photo #canvas { cursor: default; }
+
+  /* Blinking cursor drawn over canvas while typing */
+  #cursor-overlay {
+    position: fixed;
+    pointer-events: none;
+    z-index: 150;
+    width: 2px;
+    display: none;
+    animation: blink 1s step-end infinite;
+  }
+  @keyframes blink { 0%,100%{opacity:1} 50%{opacity:0} }
+
+  #file-input { display: none; }
+</style>
+</head>
+<body class="mode-draw">
+
+<canvas id="canvas"></canvas>
+
+<!-- Blinking caret indicator -->
+<div id="cursor-overlay"></div>
+
+<div id="pen-sizes">
+  <div class="size-dot selected" data-size="2"  style="width:7px;height:7px;background:#555"></div>
+  <div class="size-dot"          data-size="5"  style="width:13px;height:13px;background:#555"></div>
+  <div class="size-dot"          data-size="10" style="width:21px;height:21px;background:#555"></div>
+  <div class="size-dot"          data-size="20" style="width:31px;height:31px;background:#555"></div>
+</div>
+
+<div id="toolbar">
+  <button class="tool-btn active" id="btn-draw"  title="Draw">
+    <img src="icons/pencil.png" alt="Draw">
+  </button>
+  <button class="tool-btn" id="btn-text"  title="Add text">
+    <img src="icons/text.png" alt="Text">
+  </button>
+  <button class="tool-btn" id="btn-photo" title="Insert photo">
+    <img src="icons/camera.png" alt="Photo">
+  </button>
+</div>
+
+<div id="colour-strip">
+  <div class="colour-swatch selected" data-color="#1a1a1a" style="background:#1a1a1a" title="Black"></div>
+  <div class="colour-swatch"          data-color="#c0392b" style="background:#c0392b" title="Red"></div>
+  <div class="colour-swatch"          data-color="#1565c0" style="background:#1565c0" title="Blue"></div>
+  <div class="colour-swatch"          data-color="#2e7d32" style="background:#2e7d32" title="Green"></div>
+</div>
+
+<input type="file" id="file-input" accept="image/*">
+
+<script>
+  const canvas         = document.getElementById('canvas');
+  const ctx            = canvas.getContext('2d');
+  const penSizes       = document.getElementById('pen-sizes');
+  const btnDraw        = document.getElementById('btn-draw');
+  const btnText        = document.getElementById('btn-text');
+  const btnPhoto       = document.getElementById('btn-photo');
+  const fileInput      = document.getElementById('file-input');
+  const cursorOverlay  = document.getElementById('cursor-overlay');
+
+  const FONT_SIZE = 18;
+  const LINE_HEIGHT = 24;
+  const FONT = `${FONT_SIZE}px Georgia, serif`;
+
+  let mode     = 'draw';
+  let drawing  = false;
+  let penSize  = 2;
+  let penColor = '#1a1a1a';
+  let lastX = 0, lastY = 0;
+
+  // Typewriter state
+  let typing          = false;   // are we currently in a typing session
+  let awaitingClick   = false;   // waiting for user to click placement
+  let typeX           = 0;       // current draw X (advances as chars typed)
+  let typeY           = 0;       // current draw Y (baseline)
+  let typeStartX      = 0;       // X to return to on new line (unused — enter ends session)
+
+  // ── Canvas init ──────────────────────────────────────────────
+  function fillPaper() {
+    ctx.fillStyle = '#fffef9';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+  }
+
+  function resizeCanvas() {
+    const tmp = document.createElement('canvas');
+    tmp.width = canvas.width; tmp.height = canvas.height;
+    tmp.getContext('2d').putImageData(ctx.getImageData(0,0,canvas.width,canvas.height),0,0);
+    canvas.width = window.innerWidth; canvas.height = window.innerHeight;
+    fillPaper();
+    ctx.drawImage(tmp, 0, 0);
+  }
+
+  canvas.width = window.innerWidth;
+  canvas.height = window.innerHeight;
+  fillPaper();
+  window.addEventListener('resize', resizeCanvas);
+
+  // ── Mode switching ────────────────────────────────────────────
+  function setMode(m) {
+    endTyping();
+    mode = m;
+    document.body.className = 'mode-' + m;
+    btnDraw.classList.toggle('active',  m === 'draw');
+    btnText.classList.toggle('active',  m === 'text');
+    btnPhoto.classList.toggle('active', m === 'photo');
+    penSizes.classList.toggle('visible', m === 'draw');
+    if (m === 'text') {
+      awaitingClick = true;
+    }
+  }
+
+  btnDraw.addEventListener('click',  () => setMode('draw'));
+  btnText.addEventListener('click',  () => setMode('text'));
+  btnPhoto.addEventListener('click', () => { setMode('photo'); fileInput.click(); });
+
+  // ── Pen sizes ─────────────────────────────────────────────────
+  document.querySelectorAll('.size-dot').forEach(dot => {
+    dot.addEventListener('click', () => {
+      document.querySelectorAll('.size-dot').forEach(d => d.classList.remove('selected'));
+      dot.classList.add('selected');
+      penSize = parseInt(dot.dataset.size);
+    });
+  });
+
+  // ── Colours ───────────────────────────────────────────────────
+  document.querySelectorAll('.colour-swatch').forEach(sw => {
+    sw.addEventListener('click', () => {
+      document.querySelectorAll('.colour-swatch').forEach(s => s.classList.remove('selected'));
+      sw.classList.add('selected');
+      penColor = sw.dataset.color;
+      document.querySelectorAll('.size-dot').forEach(d => d.style.background = penColor);
+    });
+  });
+
+  // ── Drawing ───────────────────────────────────────────────────
+  function getPos(e) {
+    const r = canvas.getBoundingClientRect();
+    if (e.touches) return { x: e.touches[0].clientX - r.left, y: e.touches[0].clientY - r.top };
+    return { x: e.clientX - r.left, y: e.clientY - r.top };
+  }
+
+  canvas.addEventListener('mousedown',  onDown);
+  canvas.addEventListener('mousemove',  onMove);
+  canvas.addEventListener('mouseup',    onUp);
+  canvas.addEventListener('mouseleave', onUp);
+  canvas.addEventListener('touchstart', e => { e.preventDefault(); onDown(e); }, { passive:false });
+  canvas.addEventListener('touchmove',  e => { e.preventDefault(); onMove(e); }, { passive:false });
+  canvas.addEventListener('touchend',   onUp);
+
+  function onDown(e) {
+    const pos = getPos(e);
+
+    if (mode === 'text' && awaitingClick) {
+      // Place the text cursor here and begin typing session
+      awaitingClick = false;
+      typing = true;
+      typeX = pos.x;
+      typeY = pos.y;
+      typeStartX = pos.x;
+      showCaret();
+      // Capture keyboard
+      window.addEventListener('keydown', onKey);
+      return;
+    }
+
+    if (mode === 'draw') {
+      drawing = true;
+      lastX = pos.x; lastY = pos.y;
+      ctx.beginPath();
+      ctx.arc(pos.x, pos.y, penSize / 2, 0, Math.PI * 2);
+      ctx.fillStyle = penColor;
+      ctx.fill();
+    }
+  }
+
+  function onMove(e) {
+    if (!drawing || mode !== 'draw') return;
+    const pos = getPos(e);
+    ctx.beginPath();
+    ctx.moveTo(lastX, lastY);
+    ctx.lineTo(pos.x, pos.y);
+    ctx.strokeStyle = penColor;
+    ctx.lineWidth   = penSize;
+    ctx.lineCap     = 'round';
+    ctx.lineJoin    = 'round';
+    ctx.stroke();
+    lastX = pos.x; lastY = pos.y;
+  }
+
+  function onUp() { drawing = false; }
+
+  // ── Typewriter ────────────────────────────────────────────────
+  function onKey(e) {
+    if (!typing) return;
+
+    // Block everything except printable characters and Enter
+    e.preventDefault();
+
+    if (e.key === 'Enter') {
+      endTyping();
+      return;
+    }
+
+    // Ignore control/modifier keys, only allow single printable characters
+    if (e.key.length !== 1) return;
+
+    // Draw the character immediately onto the canvas — permanent
+    ctx.font         = FONT;
+    ctx.fillStyle    = penColor;
+    ctx.textBaseline = 'alphabetic';
+    ctx.fillText(e.key, typeX, typeY);
+
+    // Advance cursor by the width of the character just drawn
+    typeX += ctx.measureText(e.key).width;
+
+    // Update the visual caret position
+    showCaret();
+  }
+
+  function showCaret() {
+    // Position a blinking div caret at the current type position
+    cursorOverlay.style.display = 'block';
+    cursorOverlay.style.left    = typeX + 'px';
+    // Align caret top with roughly the ascender of the text
+    cursorOverlay.style.top     = (typeY - FONT_SIZE) + 'px';
+    cursorOverlay.style.height  = LINE_HEIGHT + 'px';
+    cursorOverlay.style.background = penColor;
+  }
+
+  function endTyping() {
+    typing = false;
+    awaitingClick = false;
+    cursorOverlay.style.display = 'none';
+    window.removeEventListener('keydown', onKey);
+  }
+
+  // ── Photo ─────────────────────────────────────────────────────
+  fileInput.addEventListener('change', () => {
+    const file = fileInput.files[0];
+    if (!file) { setMode('draw'); return; }
+    const reader = new FileReader();
+    reader.onload = e => {
+      const img = new Image();
+      img.onload = () => {
+        const maxW = canvas.width  * 0.6;
+        const maxH = canvas.height * 0.6;
+        let w = img.width, h = img.height;
+        if (w > maxW) { h = h * maxW / w; w = maxW; }
+        if (h > maxH) { w = w * maxH / h; h = maxH; }
+        ctx.drawImage(img, (canvas.width - w) / 2, (canvas.height - h) / 2, w, h);
+      };
+      img.src = e.target.result;
+    };
+    reader.readAsDataURL(file);
+    fileInput.value = '';
+    setMode('draw');
+  });
+</script>
+</body>
+</html>
